@@ -38,6 +38,8 @@ public abstract class AbstractValidator<T> : IValidator<T>, IEnumerable<IValidat
 	private Func<CascadeMode> _classLevelCascadeMode = () => ValidatorOptions.Global.DefaultClassLevelCascadeMode;
 	private Func<CascadeMode> _ruleLevelCascadeMode = () => ValidatorOptions.Global.DefaultRuleLevelCascadeMode;
 
+	public virtual AsyncExecutionMode AsyncExecutionMode { get; set; }
+
 #pragma warning disable 618
 	/// <summary>
 	/// <para>
@@ -63,8 +65,8 @@ public abstract class AbstractValidator<T> : IValidator<T>, IEnumerable<IValidat
 	/// </para>
 	/// </summary>
 	[Obsolete($"Use {nameof(ClassLevelCascadeMode)} and/or {nameof(RuleLevelCascadeMode)} instead. " +
-	          "CascadeMode will be removed in a future release. " +
-	          "For more details, see https://docs.fluentvalidation.net/en/latest/cascade.html")]
+						"CascadeMode will be removed in a future release. " +
+						"For more details, see https://docs.fluentvalidation.net/en/latest/cascade.html")]
 	public CascadeMode CascadeMode {
 		get {
 			if (ClassLevelCascadeMode == RuleLevelCascadeMode) {
@@ -236,6 +238,58 @@ public abstract class AbstractValidator<T> : IValidator<T>, IEnumerable<IValidat
 		EnsureInstanceNotNull(context.InstanceToValidate);
 #pragma warning restore CS0618
 
+		if (!useAsync || AsyncExecutionMode == AsyncExecutionMode.Sequential) {
+			await RunRulesInSequenceAsync(context, result, useAsync, cancellation);
+		}
+		else if (AsyncExecutionMode == AsyncExecutionMode.Multithreaded) {
+			await RunRulesMultithreadedAsync(context, useAsync, cancellation);
+		}
+		else if (AsyncExecutionMode == AsyncExecutionMode.Parallel) {
+			await RunRulesInParallelAsync(context, useAsync, cancellation);
+		}
+		else {
+			throw new InvalidOperationException($"Unhandled asynchronous execution mode: {AsyncExecutionMode}");
+		}
+
+		SetExecutedRuleSets(result, context);
+
+		if (!result.IsValid && context.ThrowOnFailures) {
+			RaiseValidationException(context, result);
+		}
+
+		return result;
+	}
+
+	private async ValueTask RunRulesInParallelAsync(ValidationContext<T> context, bool useAsync, CancellationToken cancellation) {
+		int count = Rules.Count;
+
+		// Begin executing all rules.
+		var tasks = new ValueTask[count];
+		for (int i = 0; i < count; i++) {
+			cancellation.ThrowIfCancellationRequested();
+			tasks[i] = Rules[i].ValidateAsync(context, useAsync, cancellation);
+		}
+
+		// Wait for all rules to complete.
+		List<Exception> exceptions = null;
+		for (int i = 0; i < count; i++) {
+			cancellation.ThrowIfCancellationRequested();
+
+			try {
+				await tasks[i];
+			}
+			catch (Exception ex) {
+				exceptions ??= [];
+				exceptions.Add(ex);
+			}
+		}
+
+		if (exceptions != null && exceptions.Count > 0) {
+			throw new AggregateException(exceptions);
+		}
+	}
+
+	private async ValueTask RunRulesInSequenceAsync(ValidationContext<T> context, ValidationResult result, bool useAsync, CancellationToken cancellation) {
 		int count = Rules.Count;
 
 		// Performance: Use for loop rather than foreach to reduce allocations.
@@ -251,14 +305,20 @@ public abstract class AbstractValidator<T> : IValidator<T>, IEnumerable<IValidat
 				break;
 			}
 		}
+	}
 
-		SetExecutedRuleSets(result, context);
+	private async Task RunRulesMultithreadedAsync(ValidationContext<T> context, bool useAsync, CancellationToken cancellation) {
+		int count = Rules.Count;
 
-		if (!result.IsValid && context.ThrowOnFailures) {
-			RaiseValidationException(context, result);
+		// Execute each rule on a separate thread.
+		var tasks = new Task[count];
+		for (int i = 0; i < count; i++) {
+			cancellation.ThrowIfCancellationRequested();
+			tasks[i] = Task.Run(() => Rules[i].ValidateAsync(context, useAsync, cancellation).AsTask(), cancellation);
 		}
 
-		return result;
+		// Wait for all rule to complete.
+		await Task.WhenAll(tasks).ConfigureAwait(false);
 	}
 
 	private void SetExecutedRuleSets(ValidationResult result, ValidationContext<T> context) {

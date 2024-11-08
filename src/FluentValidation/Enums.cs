@@ -21,6 +21,30 @@ namespace FluentValidation;
 using System;
 
 /// <summary>
+/// Specifies how validator should schedule asynchronous execution of rules
+/// </summary>
+public enum AsyncExecutionMode {
+
+	/// <summary>
+	/// Execute and await each rule in sequential order.
+	/// Default.
+	/// </summary>
+	Sequential = 0,
+
+	/// <summary>
+	/// Execute each rule on a separate thread.
+	/// Ignores <see cref="CascadeMode"/>.
+	/// </summary>
+	Multithreaded,
+
+	/// <summary>
+	/// Start execution of all rules on the current thread, then await all rules.
+	/// Ignores <see cref="CascadeMode"/>.
+	/// </summary>
+	Parallel
+}
+
+/// <summary>
 /// Specifies how rules should cascade when one fails.
 /// </summary>
 public enum CascadeMode {
